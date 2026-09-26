@@ -25,18 +25,40 @@
 
 实现只在“回绕次数构成的整数区间”上做线性次数的区间传播与常数次大整数
 运算，不枚举绝对计数值本身（绝对值可远超 modulus 的多项式倍）。
+
+一次换表（``ChangeoverSpec``）把轨迹分成两半：位置 ``h`` 是旧表最后一次
+抄表、同一时点也是新表开表（交接动作本身耗用为零）。旧表段
+``0..h`` 用旧模数还原，末值 ``A[h]``；新表段 ``h..n-1`` 从开表读数
+``start`` 按新模数起算，其表内计数为 ``start + D``，真实计数
+``A = A[h] + D``（平移量可为负，新表清零不产生负耗用）。两段各自最小化
+末值并各自字典序最小，即拼出全局两级最优的单调轨迹。
 """
 
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
+class ChangeoverSpec:
+    """一次换表交接：旧表在 ``position`` 处最后一次抄表、新表同点开表。"""
+
+    position: int
+    new_modulus: int
+    new_start: int
+
+
+@dataclass(frozen=True)
 class Solved:
-    """有解时的恢复结果。"""
+    """有解时的恢复结果。
+
+    无换表时填充 ``cumulative_wraps``；有换表时分别填充
+    ``old_wraps``（长度 ``h+1``）与 ``new_wraps``（长度 ``n-h``）。
+    """
 
     absolute: list[int]
     increments: list[int]
-    cumulative_wraps: list[int]
+    cumulative_wraps: list[int] | None = None
+    old_wraps: list[int] | None = None
+    new_wraps: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -59,7 +81,78 @@ def solve(
     readings: list[int | None],
     min_steps: list[int],
     max_steps: list[int],
+    changeover: ChangeoverSpec | None = None,
 ) -> Result:
+    n = len(readings)
+
+    if changeover is None:
+        return _solve_chain(
+            modulus,
+            readings,
+            min_steps,
+            max_steps,
+            result_mode="single",
+        )
+
+    h = changeover.position
+    m_new = changeover.new_modulus
+
+    # 旧表段：位置 0..h（edges 0..h-1）。h 处读数必须已知，即旧表末次抄表。
+    old_res = _solve_chain(
+        modulus,
+        readings[: h + 1],
+        min_steps[:h],
+        max_steps[:h],
+        result_mode="wraps",
+    )
+    if isinstance(old_res, Inconsistent):
+        return old_res
+
+    # 新表段：位置 h..n-1（edges h..n-2）。h 处用开表读数起步。
+    new_readings = [changeover.new_start] + readings[h + 1 :]
+    new_res = _solve_chain(
+        m_new,
+        new_readings,
+        min_steps[h:],
+        max_steps[h:],
+        result_mode="wraps",
+    )
+    if isinstance(new_res, Inconsistent):
+        # 局部下标偏移 h 个位置，映射回全局位置。
+        return Inconsistent(new_res.position + h)
+
+    # 拼接：A[h] = old.absolute[h]；之后 A = A[h] + 新表段增量累计。
+    # 新表“清零”只意味着表内计数从 start 起算，平移量可为负，
+    # 绝不产生负耗用（新表第一段增量仍 >= 0）。
+    base = old_res.absolute[h]
+    absolute = list(old_res.absolute)
+    increments = list(old_res.increments)
+    for d in new_res.increments:
+        absolute.append(absolute[-1] + d)
+        increments.append(d)
+
+    return Solved(
+        absolute=absolute,
+        increments=increments,
+        old_wraps=old_res.old_wraps,
+        new_wraps=new_res.new_wraps,
+    )
+
+
+def _solve_chain(
+    modulus: int,
+    readings: list[int | None],
+    min_steps: list[int],
+    max_steps: list[int],
+    result_mode: str,
+) -> Result:
+    """同一块表覆盖下的单链恢复（内部使用）。
+
+    ``readings[0]`` 必须已知；首项绝对计数取该读数（空仓库/新表开表起步，
+    首项回绕次数为 0）。``result_mode`` 为 ``"single"`` 时填
+    ``cumulative_wraps``，为 ``"wraps"`` 时填 ``old_wraps``/``new_wraps``
+    对应的单段回绕序列（两段拼接时需要分段返回）。
+    """
     n = len(readings)
     m = modulus
 
@@ -189,10 +282,17 @@ def solve(
     # ------------------------------------------------------------------
     # 4) 每位置累计回绕次数 wraps[i] = floor(A[i] / m)（A_i 非负）。
     # ------------------------------------------------------------------
-    cumulative_wraps = [a // m for a in absolute]
+    wraps = [a // m for a in absolute]
 
+    if result_mode == "single":
+        return Solved(
+            absolute=absolute,
+            increments=increments,
+            cumulative_wraps=wraps,
+        )
     return Solved(
         absolute=absolute,
         increments=increments,
-        cumulative_wraps=cumulative_wraps,
+        old_wraps=wraps,
+        new_wraps=wraps,
     )
